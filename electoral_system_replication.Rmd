@@ -1,0 +1,332 @@
+---
+title: "Should the winner take it all?"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r, warning=F, echo=FALSE, include=FALSE}
+library(haven)
+library(survey)
+library(tidyverse)
+library(nnet)
+library(ggeffects)
+library(scales)
+library(plotly)
+library(kableExtra)
+
+setwd("D:\\Dropbox\\My projects\\CRRC\\Blog\\electoral_system")
+
+
+ob <- read_stata("crrc_omnibus_jan2020.dta")
+
+### Keep only necessary variables for replication as most of these variables belong to someone else
+
+ob %>% 
+  map_chr(~attributes(.)$label)
+
+ob[10:17] <- lapply(ob[10:17], function (x)  replace(x, x<0, NA))
+
+ob <- ob %>%
+  mutate(party_id = case_when(
+    pn3 > 0 ~ as.numeric(pn3),
+    T ~ as.numeric(pn2)
+  ),
+    party_id = case_when(
+      party_id %in% c(2, 3, 7, 8) ~ 2,## UNM, European Georgia, For New Georgia = Liberals
+      party_id == 1 ~ 1, ## GD = GD
+      party_id %in% c(5, 6, 9) ~ 3, ## Alliance of Patriots of Georgia, Democratic Movement, Kukava = Other
+      pn2_oth %in% c(1, 3, 5) ~2, ## Lelo, United Opposition, Elisashvili's Movement = Liberals
+      party_id %in% c(4, 10)~3, ## Labor, the rest of Other = Other
+      party_id == -5 ~4,  ## No party
+      T ~ 5 ## DK/RA
+    ),
+  heard_proportional = case_when(
+    so2 > 0 ~ as.numeric(so2),
+    T ~ 0
+  ),
+  acceptable = case_when(
+    so3  %in% c(1, 2) ~ 2, ## Not acceptable
+    so3  %in% c(3, 4) ~ 1, ## Acceptable
+    so3  %in% c(-1, -2) ~ 98,
+    so3 == -5 ~ 97
+  ),
+  ditch_proportional = case_when(
+    so3  %in% c(1, 2) ~ 1,
+    T ~ 0
+  ),
+  heard_protest = case_when(
+    so4 > 0 ~ as.numeric(so4),
+    T ~ 0
+  ),
+  acceptable_protest = case_when(
+    so5 > 0 ~ as.numeric(so5),
+    so5  %in% c(-1, -2) ~ 98,
+    so5 == -5 ~ 97
+  ),
+  not_acceptable_bin = case_when(
+    acceptable_protest %in% c(1, 2) ~ 1,
+    T ~ 0
+  ),
+  
+    how_vote = case_when(
+    so6 > 0 ~ as.numeric(so6),
+    so6  %in% c(-1, -2) ~ 98,
+    so6 == -5 ~ 97
+  ),
+    only_parties = case_when(
+      how_vote == 1 ~ 1,
+      T ~ 0
+    ),
+  only_smd = case_when(
+    how_vote == 2 ~ 1,
+    T ~ 0
+  ),
+  mixed = case_when(
+    how_vote == 3 ~ 1,
+    T ~ 0
+  ),
+  threshold = case_when(
+    so7 > -1 ~ as.numeric(so7),
+    so7 %in% c(-1, -2) ~ 98,
+    so7 == -7 ~ NA_real_
+  ),
+  distribute = case_when(
+    so8 > 0 ~ as.numeric(so8),
+    so8 %in% c(-1, -2) ~ 98,
+    so8 == -7 ~ NA_real_
+  ),
+  wealth = apply(select(ob,starts_with("d4_")),1, function(x) sum(x,na.rm=T)),
+  employment = case_when(
+    d1 %in% c(1, 2, 3, 4, 7) ~ 0,
+    T ~ 1
+  ),
+  education = case_when(
+    d2 %in% c(4,5)~ 1,
+    T ~ 0
+  ),
+  prop_vs_other = case_when(
+    how_vote == 1  ~ 1, ### Models ensuring proportional representation
+    distribute == 2 ~ 1,### 
+    how_vote == 2  ~ 2, ### only SMD
+    distribute == 1 ~ 3, ### DK Mixed: ambivalent or happy with no proportional distribution
+    T ~ 4 ### DK ambivalent on everything
+  ),
+  )%>%
+  mutate(party_id = as_factor(party_id),
+         stratum=as_factor(stratum),
+         lang = as_factor(l1),
+         sex = factor(sex, levels=c(1:2), labels=c("Male", "Female")),
+         how_vote = as_factor(how_vote),
+         prop_vs_other = as_factor(prop_vs_other)
+         )
+
+
+
+### Survey design:
+obsvy <- svydesign(id=~psu,weights=~indwt, strat=~substratum, data=ob)
+
+```
+
+Party identification is a combination of two variables. First, respondents were asked to select the closest party on a tablet. In case their answer was "Don't know," "No party," or refusal, they were asked to name a party with the most sympathy. Resulting variable was coded as follows: supporters of the UNM, European Georgia, Lelo, Civic Movement, Girchi, and For New Georgia were categorized as Liberals. Supporters of the Alliance of Patriots of Georgia and Democratic Movement are put into the Conservatives group. Parties such as Labor Party and the Green Movement were grouped to “Other.”
+
+
+```{r, echo=F, warning=F}
+svymean(~factor(party_id), design=obsvy)%>%
+  as_tibble()%>%
+  mutate(party_id=row.names(.))%>%
+  mutate(party_id = factor(party_id, levels=c(1:5),
+                           labels=c("GD", "Liberals", "Other", "Unaffiliated", "DK/RA")))%>%
+  select(party_id, mean, SE)%>%
+  kable(col.names = c("Party closest to you",
+                           "Proportion",
+                           "Standard error"))%>%
+  kable_styling()
+
+```
+
+
+Have you heard that the parliament did not support proposed constitutional amendments which implied conducting elections with no majoritarians and no electoral threshold
+
+
+
+```{r, echo=F, warning=F}
+svymean(~factor(heard_proportional), design=obsvy)%>%
+  as_tibble()%>%
+  mutate(heard_proportional=row.names(.))%>%
+  mutate(heard_proportional = factor(heard_proportional, levels=c(1:2),
+                           labels=c("No", "Yes")))%>%
+  select(heard_proportional, mean, SE)%>%
+  kable(col.names = c("Have you heard?",
+                           "Proportion",
+                           "Standard error"))%>%
+  kable_styling()
+
+```
+
+
+
+
+Acceptable that the parliament did not support proposed constitutional amendments which implied conducting elections with no majoritarians and no electoral threshold
+
+
+```{r, echo=F, warning=F}
+svymean(~factor(acceptable), design=obsvy)%>%
+  as_tibble()%>%
+  mutate(acceptable=row.names(.))%>%
+  mutate(acceptable = factor(acceptable, levels=c(1:3),
+                           labels=c("Acceptable", "Not Acceptable", "DK/RA")))%>%
+  select(acceptable, mean, SE)%>%
+  kable(col.names = c("Acceptable ditching constitutional amendments?",
+                           "Proportion",
+                           "Standard error"))%>%
+  kable_styling()
+
+```
+
+Preferred mode for electing MPs.
+
+```{r, echo=F, warning=F}
+svymean(~factor(how_vote), design=obsvy)%>%
+  as_tibble()%>%
+  mutate(acceptable=row.names(.))%>%
+  mutate(acceptable = factor(acceptable, levels=c(1:5),
+                           labels=c("Only parties", "Only candidates", "Both parties and candidates", "Doesn't matter",  "DK/RA")))%>%
+  select(acceptable, mean, SE)%>%
+  kable(col.names = c("How should we elect MPs to the parliament? By voting for...",
+                           "Proportion",
+                           "Standard error"))%>%
+  kable_styling()
+
+```
+
+Preferred mode for electing MPs and allocating seats to the parliament. Support for different models of allocating mandates is the combination of two different questions. Respondents who support fully proportional representation, and those who are for a mixed system and proportional allocation of mandates within mixed representation are grouped into the proportional allocation group. Those supporting full majoritarian representation fall into a separate category. Respondents who prefer a mixed system and do not favor distribution of mandates per the vote share for parties are grouped together. Those who do not have any preference in terms of seat allocation (“Don’t know,” “Refuse to answer,” and “Does not matter”) are put into the ambivalent category.
+
+```{r, echo=F, warning=F}
+svymean(~factor(prop_vs_other), design=obsvy)%>%
+  as_tibble()%>%
+  mutate(acceptable=row.names(.))%>%
+  mutate(acceptable = factor(acceptable, levels=c(1:4),
+                           labels=c("Proportional allocation (mixed or party list voting)", "Pure majoritarian vote",
+                                           "Mixed system, no proportional allocation", "Ambivalent")))%>%
+  select(acceptable, mean, SE)%>%
+  kable(col.names = c("How should we elect MPs to the parliament? By voting for...",
+                           "Proportion",
+                           "Standard error"))%>%
+  kable_styling()
+
+```
+
+
+
+Is it necessary to have an electoral threshold? Asked only to those respondents who prefer either fully proportional vote or mixed model.
+
+
+```{r, echo=F, warning=F}
+svymean(~factor(threshold), design=obsvy, na.rm=TRUE)%>%
+  as_tibble()%>%
+  mutate(acceptable=row.names(.))%>%
+  mutate(acceptable = factor(acceptable, levels=c(1:3),
+                           labels=c("No threshold", "Have a threshold", "DK/RA")))%>%
+  select(acceptable, mean, SE)%>%
+  kable(col.names = c("Electoral threshold necessary?",
+                           "Proportion",
+                           "Standard error"))%>%
+  kable_styling()
+
+```
+
+
+
+```{r, echo=F, warning=F}
+svyby(~factor(acceptable), ~party_id, svymean, design=obsvy)%>%
+  gather(coef, tvalues, -party_id)%>%
+  slice(1:15)%>%
+  mutate(party_id = factor(party_id, levels=c(1:5),
+                           labels=c("GD", "Liberals", "Other", "Unaffiliated", "DK/RA")),
+         categories=gsub("[^0-9.-]","", coef),
+         categories= factor(categories, levels=c(1, 2, 98), labels=c("Acceptable", "Not Acceptable", "DK/RA"))
+  )%>%
+  ggplot(aes(fct_rev(categories), tvalues, fill=categories))+
+  geom_bar(stat="identity")+
+  scale_fill_manual(values=c("#00429d", "#93003a", "#999999"))+
+  geom_text(aes(categories, tvalues, label=round(tvalues*100, 0)))+
+  scale_y_continuous(labels = percent_format(), limits=c(0,1))+
+  coord_flip()+
+  facet_wrap(~party_id)+
+  labs(title="Acceptable ditching the constitutional amendment?",
+       subtitle = "By party identification",
+       caption = "Results are weighted",
+       x="Proportion")+
+  theme_bw()+
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.title.x = element_blank())
+
+```
+
+
+
+```{r, echo=F, warning=F}
+svyby(~factor(prop_vs_other), ~factor(acceptable), svymean, design=obsvy)%>%
+  mutate(acceptable=row.names(.))%>%
+  gather(coef, tvalues, -acceptable)%>%
+  slice(4:15)%>%
+  mutate(
+        categories=gsub("[^0-9.-]","", coef),
+        categories = factor(categories, levels=c(1:4),
+                           labels=c("Proportional allocation (mixed or party list voting)", "Pure majoritarian vote",
+                                           "Mixed system, no proportional allocation", "Ambivalent")),
+        acceptable= factor(acceptable, levels=c(1, 2, 98), labels=c("Acceptable", "Unacceptable", "DK/RA")),
+         tvalues=as.numeric(tvalues)
+  )%>%
+  ggplot(aes(fct_rev(categories), tvalues, fill=categories))+
+  geom_bar(stat="identity")+
+  scale_fill_manual(values=c("#ee8572", "#35495e", "#63b7af", "#999999"))+
+  geom_text(aes(categories, tvalues, label=round(tvalues*100, 0)))+
+  scale_y_continuous(labels = percent_format(), limits=c(0,1))+
+  coord_flip()+
+  facet_wrap(~acceptable)+
+  labs(title="Acceptable ditching the constitutional amendment?",
+       subtitle = "By support for different models of allocating mandates",
+       caption = "Results are weighted",
+       x="Proportion")+
+  theme_bw()+
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.title.x = element_blank())
+
+
+```
+
+
+
+```{r, echo=F, warning=F}
+svyby(~factor(prop_vs_other), ~party_id, svymean, design=obsvy)%>%
+  gather(coef, tvalues, -party_id)%>%
+  slice(1:20)%>%
+  mutate(party_id = factor(party_id, levels=c(1:5),
+                           labels=c("GD", "Liberals", "Other", "Unaffiliated", "DK/RA")),
+         categories=gsub("[^0-9.-]","", coef),
+         categories= factor(categories, levels=c(1, 2, 3, 4), labels=c("Proportional allocation (mixed or party list voting)", "Pure majoritarian vote",
+                                                                       "Mixed system, no proportional allocation", "Ambivalent"))
+  )%>%
+  ggplot(aes(fct_rev(categories), tvalues, fill=categories))+
+  geom_bar(stat="identity")+
+  geom_text(aes(categories, tvalues, label=round(tvalues*100, 0)))+
+  scale_fill_manual(values=c("#ee8572", "#35495e", "#63b7af", "#999999"))+
+  scale_y_continuous(labels = percent_format(), limits=c(0,1))+
+  coord_flip()+
+  facet_wrap(~party_id)+
+  labs(title="Preferred electoral system",
+       subtitle = "By party identification",
+       caption = "Results are weighted",
+       x="Proportion")+
+  theme_bw()+
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.title.x = element_blank())
+
+```
+
